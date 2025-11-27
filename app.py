@@ -11,23 +11,39 @@ import plotly.graph_objects as go
 # ---------------------------------------------------------------
 # Google Drive Downloader
 # ---------------------------------------------------------------
+import re
+
+def extract_file_id(shared_link):
+    """
+    Extracts a Google Drive file ID from any valid link format.
+    """
+    patterns = [
+        r"/d/([a-zA-Z0-9_-]+)",                     # https://drive.google.com/file/d/<ID>/view
+        r"id=([a-zA-Z0-9_-]+)",                     # https://drive.google.com/open?id=<ID>
+        r"uc\?export=download&id=([a-zA-Z0-9_-]+)", # direct download
+    ]
+    for p in patterns:
+        m = re.search(p, shared_link)
+        if m:
+            return m.group(1)
+    raise ValueError("Invalid Google Drive link format.")
+
+
 def download_from_drive(shared_link, output_path):
     """
-    Downloads a file from Google Drive using a shareable link.
+    Downloads a file from Google Drive given ANY valid share link.
     """
-    try:
-        file_id = shared_link.split("/d/")[1].split("/")[0]
-    except Exception:
-        raise ValueError("Invalid Google Drive link format.")
+    file_id = extract_file_id(shared_link)
 
-    url = f"https://drive.google.com/file/d/1jwZZyBjXcRo6K9e-6N1CXHnS6Xv0mJOw/view?usp=sharing"
+    url = f"https://drive.google.com/uc?export=download&id=1jwZZyBjXcRo6K9e-6N1CXHnS6Xv0mJOw"
+
     response = requests.get(url)
-
     if response.status_code != 200:
-        raise ValueError("Failed to download model from Google Drive.")
+        raise ValueError(f"Failed to download model. HTTP {response.status_code}")
 
     with open(output_path, "wb") as f:
         f.write(response.content)
+
 
 
 # ---------------------------------------------------------------
@@ -35,7 +51,7 @@ def download_from_drive(shared_link, output_path):
 # ---------------------------------------------------------------
 @st.cache_resource
 def load_resources():
-    GOOGLE_DRIVE_SHARED_LINK = "PUT_YOUR_SHAREABLE_LINK_HERE"
+    GOOGLE_DRIVE_SHARED_LINK = "https://drive.google.com/file/d/1jwZZyBjXcRo6K9e-6N1CXHnS6Xv0mJOw/view?usp=sharing"
     local_model_path = Path("Saved_Models/xgb_yield_ensemble.joblib")
 
     # Download model if not already present
@@ -397,3 +413,4 @@ if st.button("Predict", use_container_width=True):
             ),
             use_container_width=True,
         )
+
