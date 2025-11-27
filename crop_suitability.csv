@@ -1,0 +1,7 @@
+Crop,TempMin,TempMax,RainMin,RainMax,HumidityMin,PHmin,PHmax,SeasonsAllowed,StatesAllowed
+Rice,20,35,1000,2000,70,5.0,7.0,"Kharif,Rabi","Punjab,Bihar,West Bengal,Odisha,Andhra Pradesh"
+Wheat,12,25,300,900,20,6.0,7.5,"Rabi","Punjab,Haryana,UP,Rajasthan,MP"
+Maize,18,32,500,800,40,5.5,7.0,"Kharif,Summer","Karnataka,Bihar,Punjab,Maharashtra"
+Lentil,10,25,300,450,20,6.0,8.0,"Rabi","UP,MP,Bihar,West Bengal"
+Cotton,21,30,600,1200,30,5.8,8.0,"Kharif","Gujarat,Maharashtra,Telangana,Punjab"
+Jute,24,37,1500,2500,70,6.0,7.5,"Kharif","West Bengal,Assam,Odisha,Bihar"
