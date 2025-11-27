@@ -7,6 +7,8 @@ import streamlit as st
 from pathlib import Path
 import plotly.graph_objects as go
 
+# MUST come immediately after imports
+st.set_page_config(page_title="Crop & Yield Prediction", layout="wide")
 
 # ---------------------------------------------------------------
 # Google Drive Downloader
@@ -413,4 +415,5 @@ if st.button("Predict", use_container_width=True):
             ),
             use_container_width=True,
         )
+
 
