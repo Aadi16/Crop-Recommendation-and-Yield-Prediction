@@ -1,28 +1,35 @@
 import os
-import requests
+import re
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
-from pathlib import Path
 import plotly.graph_objects as go
 
-# MUST come immediately after imports
+# ---------------------------------------------------------------------
+# Page config (must be the first Streamlit command)
+# ---------------------------------------------------------------------
 st.set_page_config(page_title="Crop & Yield Prediction", layout="wide")
 
-# ---------------------------------------------------------------
-# Google Drive Downloader
-# ---------------------------------------------------------------
-import re
 
-def extract_file_id(shared_link):
+# ---------------------------------------------------------------------
+# Google Drive utilities
+# ---------------------------------------------------------------------
+def extract_file_id(shared_link: str) -> str:
     """
-    Extracts a Google Drive file ID from any valid link format.
+    Extract a Google Drive file ID from a shareable link.
+    Supports common formats like:
+      - https://drive.google.com/file/d/<ID>/view?usp=sharing
+      - https://drive.google.com/open?id=<ID>
+      - https://drive.google.com/uc?export=download&id=<ID>
     """
     patterns = [
-        r"/d/([a-zA-Z0-9_-]+)",                     # https://drive.google.com/file/d/<ID>/view
-        r"id=([a-zA-Z0-9_-]+)",                     # https://drive.google.com/open?id=<ID>
-        r"uc\?export=download&id=([a-zA-Z0-9_-]+)", # direct download
+        r"/d/([a-zA-Z0-9_-]+)",
+        r"id=([a-zA-Z0-9_-]+)",
+        r"uc\?export=download&id=([a-zA-Z0-9_-]+)",
     ]
     for p in patterns:
         m = re.search(p, shared_link)
@@ -31,12 +38,11 @@ def extract_file_id(shared_link):
     raise ValueError("Invalid Google Drive link format.")
 
 
-def download_from_drive(shared_link, output_path):
+def download_from_drive(shared_link: str, output_path: Path) -> None:
     """
-    Downloads a file from Google Drive given ANY valid share link.
+    Download a file from Google Drive given a share link and save it to output_path.
     """
     file_id = extract_file_id(shared_link)
-
     url = f"https://drive.google.com/uc?export=download&id=1jwZZyBjXcRo6K9e-6N1CXHnS6Xv0mJOw"
 
     response = requests.get(url)
@@ -47,16 +53,17 @@ def download_from_drive(shared_link, output_path):
         f.write(response.content)
 
 
-
-# ---------------------------------------------------------------
-# Load Models
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Load models and resources
+# ---------------------------------------------------------------------
 @st.cache_resource
 def load_resources():
-    GOOGLE_DRIVE_SHARED_LINK = "https://drive.google.com/file/d/1jwZZyBjXcRo6K9e-6N1CXHnS6Xv0mJOw/view?usp=sharing"
+    # Google Drive link for the XGBoost yield ensemble
+    GOOGLE_DRIVE_SHARED_LINK = (
+        "https://drive.google.com/file/d/1jwZZyBjXcRo6K9e-6N1CXHnS6Xv0mJOw/view?usp=sharing"
+    )
     local_model_path = Path("Saved_Models/xgb_yield_ensemble.joblib")
 
-    # Download model if not already present
     if not local_model_path.exists():
         local_model_path.parent.mkdir(parents=True, exist_ok=True)
         download_from_drive(GOOGLE_DRIVE_SHARED_LINK, local_model_path)
@@ -96,38 +103,48 @@ def load_resources():
 ) = load_resources()
 
 
-# ---------------------------------------------------------------
-# Agronomic Scoring
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Agronomic scoring
+# ---------------------------------------------------------------------
 def compute_suitability_score(row, temp, rain, humidity, ph, season, state):
     values = []
 
+    # Temperature
     values.append(
-        1.0 if row.TempMin <= temp <= row.TempMax
+        1.0
+        if row.TempMin <= temp <= row.TempMax
         else max(0, 1 - abs(temp - (row.TempMin + row.TempMax) / 2) / 10)
     )
 
+    # Annual rainfall
     values.append(
-        1.0 if row.RainMin <= rain <= row.RainMax
+        1.0
+        if row.RainMin <= rain <= row.RainMax
         else max(0, 1 - abs(rain - (row.RainMin + row.RainMax) / 2) / 1500)
     )
 
+    # Humidity
     values.append(min(1.0, humidity / max(row.HumidityMin, 1)))
 
+    # Soil pH
     values.append(
-        1.0 if row.PHmin <= ph <= row.PHmax
+        1.0
+        if row.PHmin <= ph <= row.PHmax
         else max(0, 1 - abs(ph - (row.PHmin + row.PHmax) / 2) / 2)
     )
 
+    # Season
     values.append(1.0 if season in row.SeasonsAllowed.split(",") else 0.3)
+
+    # State / region
     values.append(1.0 if state in row.StatesAllowed.split(",") else 0.3)
 
     return np.mean(values)
 
 
-# ---------------------------------------------------------------
-# Crop Recommendation (ML + Agronomic Rules)
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Crop recommendation (ML + agronomic rules)
+# ---------------------------------------------------------------------
 def fused_recommendation(N, P, K, temp, humidity, ph, rainfall, state, season):
     df_inp = pd.DataFrame(
         [[N, P, K, temp, humidity, ph, rainfall]],
@@ -158,48 +175,64 @@ def fused_recommendation(N, P, K, temp, humidity, ph, rainfall, state, season):
     return scores[0], scores
 
 
-# ---------------------------------------------------------------
-# Yield Ensemble Prediction
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Yield ensemble prediction (XGBoost ensemble)
+# ---------------------------------------------------------------------
 def ensemble_predict(models, X):
-    predictions = np.array([m.predict(X)[0] for m in models])
-    return float(predictions.mean()), float(predictions.std(ddof=1))
+    preds = np.array([m.predict(X)[0] for m in models])
+    return float(preds.mean()), float(preds.std(ddof=1))
 
 
-# ---------------------------------------------------------------
-# Global Explainability (Yield Model)
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Global explainability (yield model)
+# ---------------------------------------------------------------------
 def global_importance(models, feature_names):
     importance = np.mean([m.feature_importances_ for m in models], axis=0)
     return dict(zip(feature_names, importance))
 
 
-# ---------------------------------------------------------------
-# Local Explainability (Yield What-If)
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Local explainability (yield what-if)
+# ---------------------------------------------------------------------
 def compute_local_explainability(models, X):
     base_pred = float(np.mean([m.predict(X)[0] for m in models]))
     results = {}
 
     for col in X.columns:
-        Xd = X.copy()
-        Xu = X.copy()
+        X_down = X.copy()
+        X_up = X.copy()
 
-        Xd[col] *= 0.90
-        Xu[col] *= 1.10
+        X_down[col] *= 0.90
+        X_up[col] *= 1.10
 
-        yd = float(np.mean([m.predict(Xd)[0] for m in models]))
-        yu = float(np.mean([m.predict(Xu)[0] for m in models]))
+        y_down = float(np.mean([m.predict(X_down)[0] for m in models]))
+        y_up = float(np.mean([m.predict(X_up)[0] for m in models]))
 
-        results[col] = {"baseline": base_pred, "decrease": yd, "increase": yu}
+        results[col] = {
+            "baseline": base_pred,
+            "decrease": y_down,
+            "increase": y_up,
+        }
 
     return results
 
 
-# ---------------------------------------------------------------
-# Local Explainability (Crop Recommendation)
-# ---------------------------------------------------------------
-def compute_rec_local_explainability(best_crop, ranking, N, P, K, temp, humidity, ph, rainfall, state, season):
+# ---------------------------------------------------------------------
+# Local explainability (crop recommendation what-if)
+# ---------------------------------------------------------------------
+def compute_rec_local_explainability(
+    best_crop,
+    ranking,
+    N,
+    P,
+    K,
+    temp,
+    humidity,
+    ph,
+    rainfall,
+    state,
+    season,
+):
     base_scores = dict(ranking)
     base_value = base_scores.get(best_crop, None)
 
@@ -207,7 +240,15 @@ def compute_rec_local_explainability(best_crop, ranking, N, P, K, temp, humidity
     results = {}
 
     for ft in features:
-        params = dict(N=N, P=P, K=K, temperature=temp, humidity=humidity, ph=ph, rainfall=rainfall)
+        params = dict(
+            N=N,
+            P=P,
+            K=K,
+            temperature=temp,
+            humidity=humidity,
+            ph=ph,
+            rainfall=rainfall,
+        )
 
         p_dec = params.copy()
         p_inc = params.copy()
@@ -215,12 +256,26 @@ def compute_rec_local_explainability(best_crop, ranking, N, P, K, temp, humidity
         p_inc[ft] *= 1.10
 
         _, r_dec = fused_recommendation(
-            p_dec["N"], p_dec["P"], p_dec["K"], p_dec["temperature"],
-            p_dec["humidity"], p_dec["ph"], p_dec["rainfall"], state, season
+            p_dec["N"],
+            p_dec["P"],
+            p_dec["K"],
+            p_dec["temperature"],
+            p_dec["humidity"],
+            p_dec["ph"],
+            p_dec["rainfall"],
+            state,
+            season,
         )
         _, r_inc = fused_recommendation(
-            p_inc["N"], p_inc["P"], p_inc["K"], p_inc["temperature"],
-            p_inc["humidity"], p_inc["ph"], p_inc["rainfall"], state, season
+            p_inc["N"],
+            p_inc["P"],
+            p_inc["K"],
+            p_inc["temperature"],
+            p_inc["humidity"],
+            p_inc["ph"],
+            p_inc["rainfall"],
+            state,
+            season,
         )
 
         results[ft] = {
@@ -232,23 +287,40 @@ def compute_rec_local_explainability(best_crop, ranking, N, P, K, temp, humidity
     return results
 
 
-# ---------------------------------------------------------------
-# Hybrid Pipeline
-# ---------------------------------------------------------------
-def hybrid_predict(N, P, K, temp, humidity, ph, rainfall, state, season, year, area, production):
-    best_crop, ranking = fused_recommendation(N, P, K, temp, humidity, ph, rainfall, state, season)
+# ---------------------------------------------------------------------
+# Hybrid prediction pipeline
+# ---------------------------------------------------------------------
+def hybrid_predict(
+    N,
+    P,
+    K,
+    temp,
+    humidity,
+    ph,
+    rainfall,
+    state,
+    season,
+    year,
+    area,
+    production,
+):
+    best_crop, ranking = fused_recommendation(
+        N, P, K, temp, humidity, ph, rainfall, state, season
+    )
 
     final_crop = best_crop[0]
     yield_crop = valid_crop_map.get(final_crop.lower(), final_crop)
 
-    df = pd.DataFrame({
-        "Crop": [yield_crop],
-        "State": [state],
-        "Season": [season],
-        "Year_int": [year],
-        "Area": [area],
-        "Production": [production],
-    })
+    df = pd.DataFrame(
+        {
+            "Crop": [yield_crop],
+            "State": [state],
+            "Season": [season],
+            "Year_int": [year],
+            "Area": [area],
+            "Production": [production],
+        }
+    )
 
     df["Crop_enc"] = le_crop.transform(df["Crop"])
     df["State_enc"] = le_state.transform(df["State"])
@@ -260,24 +332,27 @@ def hybrid_predict(N, P, K, temp, humidity, ph, rainfall, state, season, year, a
     ci_low = mean_y - 1.96 * std_y
     ci_high = mean_y + 1.96 * std_y
 
+    global_exp = global_importance(yield_ensemble, X.columns.tolist())
+    local_exp = compute_local_explainability(yield_ensemble, X)
+    rec_local_exp = compute_rec_local_explainability(
+        final_crop, ranking, N, P, K, temp, humidity, ph, rainfall, state, season
+    )
+
     return {
         "Crop": final_crop,
         "Confidence": best_crop[1] * 100,
         "Yield": mean_y,
         "Std": std_y,
         "CI": (ci_low, ci_high),
-        "GlobalExplain": global_importance(yield_ensemble, X.columns.tolist()),
-        "LocalExplain": compute_local_explainability(yield_ensemble, X),
-        "RecLocalExplain": compute_rec_local_explainability(
-            final_crop, ranking, N, P, K, temp, humidity, ph, rainfall, state, season
-        ),
+        "GlobalExplain": global_exp,
+        "LocalExplain": local_exp,
+        "RecLocalExplain": rec_local_exp,
     }
 
 
-# ---------------------------------------------------------------
-# Streamlit Interface
-# ---------------------------------------------------------------
-st.set_page_config(page_title="Crop & Yield Prediction", layout="wide")
+# ---------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------
 st.title("Crop Recommendation and Yield Prediction")
 
 st.subheader("Input Parameters")
@@ -308,12 +383,23 @@ with c6:
     year = st.number_input("Year", min_value=2000, max_value=2050, value=2024)
 
 
-# ---------------------------------------------------------------
-# Prediction Button
-# ---------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Prediction button
+# ---------------------------------------------------------------------
 if st.button("Predict", use_container_width=True):
     res = hybrid_predict(
-        N, P, K, temp, humidity, ph, rainfall, state, season, year, area, production
+        N,
+        P,
+        K,
+        temp,
+        humidity,
+        ph,
+        rainfall,
+        state,
+        season,
+        year,
+        area,
+        production,
     )
 
     crop_name = res["Crop"].upper()
@@ -325,80 +411,92 @@ if st.button("Predict", use_container_width=True):
     st.write(f"Confidence Interval: {res['CI'][0]:.2f} – {res['CI'][1]:.2f}")
     st.write(f"(Recommendation Confidence: {res['Confidence']:.1f}%)")
 
+    # Global explainability
     st.subheader("Global Explainability (Yield Model)")
     st.dataframe(
-        pd.DataFrame({
-            "Feature": list(res["GlobalExplain"].keys()),
-            "Importance": list(res["GlobalExplain"].values()),
-        }).sort_values("Importance", ascending=False),
+        pd.DataFrame(
+            {
+                "Feature": list(res["GlobalExplain"].keys()),
+                "Importance": list(res["GlobalExplain"].values()),
+            }
+        ).sort_values("Importance", ascending=False),
         use_container_width=True,
     )
 
+    # Crop recommendation: local explainability
     st.subheader("Local Explainability (Crop Recommendation)")
     tab1, tab2 = st.tabs(["Interactive Graph", "Raw Values"])
 
     with tab1:
-        r = res["RecLocalExplain"]
+        rec_local = res["RecLocalExplain"]
         features = []
-        dec, base, inc = [], [], []
+        dec_vals = []
+        base_vals = []
+        inc_vals = []
 
-        for ft, vals in r.items():
+        for ft, vals in rec_local.items():
             if vals["baseline"] is None:
                 continue
             features.append(ft)
-            dec.append(vals["decrease"])
-            base.append(vals["baseline"])
-            inc.append(vals["increase"])
+            dec_vals.append(vals["decrease"])
+            base_vals.append(vals["baseline"])
+            inc_vals.append(vals["increase"])
 
         if features:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(name="Decrease 10%", x=features, y=dec))
-            fig.add_trace(go.Bar(name="Baseline", x=features, y=base))
-            fig.add_trace(go.Bar(name="Increase 10%", x=features, y=inc))
-            fig.update_layout(
+            fig_rec = go.Figure()
+            fig_rec.add_trace(go.Bar(name="Decrease 10%", x=features, y=dec_vals))
+            fig_rec.add_trace(go.Bar(name="Baseline", x=features, y=base_vals))
+            fig_rec.add_trace(go.Bar(name="Increase 10%", x=features, y=inc_vals))
+            fig_rec.update_layout(
                 barmode="group",
                 xaxis_title="Input Feature",
-                yaxis_title=f"Hybrid Recommendation Score ({crop_name})",
+                yaxis_title=f"Hybrid recommendation score ({crop_name})",
                 height=450,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig_rec, use_container_width=True)
 
     with tab2:
         if features:
             st.dataframe(
                 pd.DataFrame(
-                    {"Feature": features, "Decrease 10%": dec,
-                     "Baseline": base, "Increase 10%": inc}
+                    {
+                        "Feature": features,
+                        "Decrease 10%": dec_vals,
+                        "Baseline": base_vals,
+                        "Increase 10%": inc_vals,
+                    }
                 ),
                 use_container_width=True,
             )
 
+    # Yield local explainability
     st.subheader("Local Explainability (Yield What-If)")
-
     t3, t4 = st.tabs(["Interactive Graph", "Raw Values"])
 
     with t3:
-        y = res["LocalExplain"]
+        local = res["LocalExplain"]
         y_features = []
-        yd, yb, yi = [], [], []
+        y_dec = []
+        y_base = []
+        y_inc = []
 
-        for ft, vals in y.items():
+        for ft, vals in local.items():
             y_features.append(ft)
-            yd.append(vals["decrease"])
-            yb.append(vals["baseline"])
-            yi.append(vals["increase"])
+            y_dec.append(vals["decrease"])
+            y_base.append(vals["baseline"])
+            y_inc.append(vals["increase"])
 
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(name="Decrease 10%", x=y_features, y=yd))
-        fig2.add_trace(go.Bar(name="Baseline", x=y_features, y=yb))
-        fig2.add_trace(go.Bar(name="Increase 10%", x=y_features, y=yi))
-        fig2.update_layout(
+        fig_y = go.Figure()
+        fig_y.add_trace(go.Bar(name="Decrease 10%", x=y_features, y=y_dec))
+        fig_y.add_trace(go.Bar(name="Baseline", x=y_features, y=y_base))
+        fig_y.add_trace(go.Bar(name="Increase 10%", x=y_features, y=y_inc))
+        fig_y.update_layout(
             barmode="group",
             xaxis_title="Feature",
             yaxis_title="Predicted Yield (kg/ha)",
             height=450,
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig_y, use_container_width=True)
 
     with t4:
         st.dataframe(
@@ -415,5 +513,3 @@ if st.button("Predict", use_container_width=True):
             ),
             use_container_width=True,
         )
-
-
